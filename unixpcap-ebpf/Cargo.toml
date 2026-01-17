@@ -1,0 +1,14 @@
+[package]
+name = "unixpcap-ebpf"
+edition.workspace = true
+version.workspace = true
+authors.workspace = true
+description.workspace = true
+
+[build-dependencies]
+libbpf-cargo.workspace = true
+[dependencies]
+libbpf-rs.workspace = true
+
+[lints]
+workspace = true

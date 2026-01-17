@@ -1,0 +1,16 @@
+[workspace]
+resolver = "3"
+members = ["unixpcap", "unixpcap-ebpf"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+authors = ["Jan Waltl"]
+description = "Capture unix socket traffic into pcap files"
+
+
+[workspace.dependencies]
+libbpf-cargo = "0.24.8"
+libbpf-rs = "0.24.8"
+
+[workspace.lints]
