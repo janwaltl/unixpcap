@@ -1,7 +1,7 @@
-use std::mem::MaybeUninit;
 use anyhow::Result;
+use std::mem::MaybeUninit;
 
-use libbpf_rs::skel::{SkelBuilder,OpenSkel,Skel};
+use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use unixpcap_ebpf;
 
 fn main() -> Result<()> {
@@ -13,7 +13,8 @@ fn main() -> Result<()> {
 
     let mut skel = open_skel.load()?;
     skel.attach()?;
-    println!("Hello");
 
-    return Ok(());
+    println!("Capturing packets");
+
+    loop {}
 }
