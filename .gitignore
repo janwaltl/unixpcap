@@ -10,3 +10,6 @@ target/
 
 # Ignore generated bpf program bindings
 **/*.skel.rs
+
+# Ignore captured files
+*.pcap

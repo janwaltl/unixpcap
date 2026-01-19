@@ -1,7 +1,13 @@
+mod pcap_writer;
+
 use anyhow::Result;
 use byteorder::ByteOrder;
+use clap::Parser;
+use std::fs::File;
+use std::io::BufWriter;
 use std::mem::MaybeUninit;
 
+use crate::pcap_writer::PcapNgWriter;
 use libbpf_rs::RingBufferBuilder;
 use libbpf_rs::skel::{OpenSkel, Skel, SkelBuilder};
 use unixpcap_ebpf;
@@ -17,20 +23,49 @@ struct CapturedPacket<'a> {
     data: &'a [u8],
 }
 
-fn process_packet(packet: CapturedPacket) {
-    match std::str::from_utf8(&packet.data) {
-        Ok(v) => println!(
-            "tid={}; timestamp={}; txt={}",
-            packet.hdr.tid, packet.hdr.timestamp, v
-        ),
-        Err(_) => println!(
-            "tid={}; timestamp={}; data={:02X?}",
-            packet.hdr.tid, packet.hdr.timestamp, packet.data
-        ),
-    };
+struct PcapCapture {
+    writer: PcapNgWriter<BufWriter<File>>,
+}
+impl PcapCapture {
+    pub fn new(file: &str) -> Result<Self> {
+        let file = File::create(file)?;
+        let writer = BufWriter::new(file);
+        let mut pcap_writer = PcapNgWriter::new(writer)?;
+        pcap_writer.write_header()?;
+
+        Ok(Self {
+            writer: pcap_writer,
+        })
+    }
+    fn process_packet(&mut self, packet: CapturedPacket) -> Result<()> {
+        // Print to stdout
+        match std::str::from_utf8(&packet.data) {
+            Ok(v) => println!(
+                "tid={}; timestamp={}; txt={}",
+                packet.hdr.tid, packet.hdr.timestamp, v
+            ),
+            Err(_) => println!(
+                "tid={}; timestamp={}; data={:02X?}",
+                packet.hdr.tid, packet.hdr.timestamp, packet.data
+            ),
+        };
+        // Add to writer
+        self.writer
+            .write_packet(packet.hdr.timestamp, packet.hdr.tid, packet.data)?;
+        Ok(())
+    }
+}
+
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// Pcap file to store the capture packets into.
+    name: String,
 }
 
 fn main() -> Result<()> {
+    let args = Args::parse();
+
     // Load the eBPF program
     let mut builder = unixpcap_ebpf::UnixpcapSkelBuilder::default();
     builder.obj_builder.debug(true);
@@ -40,19 +75,23 @@ fn main() -> Result<()> {
 
     let mut skel = open_skel.load()?;
 
+    let mut capture = PcapCapture::new(args.name.as_str())?;
+
     let mut packet_rb_builder = RingBufferBuilder::default();
     packet_rb_builder.add(&skel.maps.captured_packets, |data| {
         if data.len() < 16 {
             return 0;
         }
-        process_packet(CapturedPacket {
-            hdr: CapturedPacketHeader {
-                timestamp: byteorder::LittleEndian::read_u64(&data[0..8]),
-                tid: byteorder::LittleEndian::read_u32(&data[8..12]),
-                //data_len: byteorder::LittleEndian::read_u32(&data[12..16]),
-            },
-            data: &data[16..],
-        });
+        capture
+            .process_packet(CapturedPacket {
+                hdr: CapturedPacketHeader {
+                    timestamp: byteorder::LittleEndian::read_u64(&data[0..8]),
+                    tid: byteorder::LittleEndian::read_u32(&data[8..12]),
+                    //data_len: byteorder::LittleEndian::read_u32(&data[12..16]),
+                },
+                data: &data[16..],
+            })
+            .unwrap();
         return 0;
     })?;
 

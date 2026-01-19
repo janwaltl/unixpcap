@@ -8,6 +8,7 @@ unixpcap-ebpf = { path = "../unixpcap-ebpf" }
 libbpf-rs.workspace = true
 anyhow = "1.0.100"
 byteorder = "1.5.0"
+clap = { version = "4.5.54", features = ["derive"] }
 
 [[bin]]
 name = "unixpcap"
