@@ -23,10 +23,10 @@ struct packet_hdr_t {
 
 // Captured packet
 //
-// Layout of captured packet in the ring buffer, data field is of variable
-// length.
+// Layout of largest captured packet in the ring buffer.
 struct packet {
     struct packet_hdr_t hdr;
+    // Trailing, variable length
     uint8_t data[MAX_MSG_SIZE];
 };
 
