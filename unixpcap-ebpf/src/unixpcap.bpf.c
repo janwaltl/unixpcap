@@ -12,14 +12,15 @@ struct packet_hdr_t {
     uint64_t timestamp;
     // thread ID of the receiver
     uint32_t tid;
-    // data length
-    uint32_t data_len;
+    // original data length,
+    // captured length is deduced from ring buffer entry size.
+    uint32_t orig_data_len;
 };
 
 // Support up to 32KB packets, subtract header to make packets aligned
 #define MAX_MSG_SIZE (32 * 1024 - sizeof(struct packet_hdr_t))
 
-// Captured packet
+// Captured packet (of max size)
 struct packet {
     struct packet_hdr_t hdr;
     uint8_t data[MAX_MSG_SIZE];
@@ -130,22 +131,23 @@ BPF_PROG(unixpcap_unix_dgram_capture, struct socket *sock, struct msghdr *msg,
         goto cleanup;
     }
 
+    size_t captured_len = len;
     // Copy data to scratch (with verifier checks)
-    if (len > 0) {
-        if (len > MAX_MSG_SIZE) {
-            len = MAX_MSG_SIZE;
+    if (captured_len > 0) {
+        if (captured_len > MAX_MSG_SIZE) {
+            captured_len = MAX_MSG_SIZE;
         }
-        bpf_probe_read_user(scratch->data, len, state->data);
+        bpf_probe_read_user(scratch->data, captured_len, state->data);
     }
 
     // Fill header
-    scratch->hdr.data_len = (uint32_t)len;
+    scratch->hdr.orig_data_len = (uint32_t)len;
     scratch->hdr.tid = (uint32_t)tid;
     // IMPROVE there are new variants (coarse, boot) in newer kernels.
     scratch->hdr.timestamp = bpf_ktime_get_ns();
 
-    bpf_ringbuf_output(&captured_packets, scratch, sizeof(scratch->hdr) + len,
-                       0);
+    bpf_ringbuf_output(&captured_packets, scratch,
+                       sizeof(scratch->hdr) + captured_len, 0);
 cleanup:
     bpf_map_delete_elem(&ctx_map, &tid);
     return 0;

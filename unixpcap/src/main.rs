@@ -15,7 +15,7 @@ use unixpcap_ebpf;
 struct CapturedPacketHeader {
     timestamp: u64,
     tid: u32,
-    //data_len: u32,
+    orig_data_len: u32,
 }
 
 struct CapturedPacket<'a> {
@@ -51,7 +51,7 @@ impl PcapCapture {
         };
         // Add to writer
         self.writer
-            .write_packet(packet.hdr.timestamp, packet.hdr.tid, packet.data)?;
+            .write_packet(packet.hdr.timestamp, packet.hdr.tid, packet.hdr.orig_data_len,packet.data)?;
         Ok(())
     }
 }
@@ -87,7 +87,7 @@ fn main() -> Result<()> {
                 hdr: CapturedPacketHeader {
                     timestamp: byteorder::LittleEndian::read_u64(&data[0..8]),
                     tid: byteorder::LittleEndian::read_u32(&data[8..12]),
-                    //data_len: byteorder::LittleEndian::read_u32(&data[12..16]),
+                    orig_data_len: byteorder::LittleEndian::read_u32(&data[12..16]),
                 },
                 data: &data[16..],
             })

@@ -62,7 +62,13 @@ impl<W: Write> PcapNgWriter<W> {
         Ok(())
     }
 
-    pub fn write_packet(&mut self, timestamp_ns: u64, tid: u32, data: &[u8]) -> Result<()> {
+    pub fn write_packet(
+        &mut self,
+        timestamp_ns: u64,
+        tid: u32,
+        orig_len: u32,
+        data: &[u8],
+    ) -> Result<()> {
         // Packet is written in EPB (see below)
         // Construct the packet before the header so we can write
         // the total length into the header.
@@ -72,6 +78,7 @@ impl<W: Write> PcapNgWriter<W> {
         // Ethernet (14) + IP (20) + UDP(8)
         let header_len = 14 + 20 + 8;
         let packet_len = header_len + data.len();
+        let orig_packet_len = header_len + (orig_len as usize);
         // EPB requires 32bit alignment
         let padded_packet_len = (packet_len + 3) & !3;
 
@@ -91,7 +98,7 @@ impl<W: Write> PcapNgWriter<W> {
         // DSCP+ECN - just 0
         pkt.write_u8(0)?;
         // Packet length
-        pkt.write_u16::<BigEndian>((packet_len - 14) as u16)?;
+        pkt.write_u16::<BigEndian>((orig_packet_len - 14) as u16)?;
         // IP ID
         pkt.write_u16::<BigEndian>(self.seq as u16)?; // ID
         self.seq = self.seq.wrapping_add(1);
@@ -116,7 +123,7 @@ impl<W: Write> PcapNgWriter<W> {
         // Dst port - use bits of thread ID
         pkt.write_u16::<BigEndian>(tid as u16)?;
         // Data len - UDP header (8) + data
-        pkt.write_u16::<BigEndian>((8 + data.len()) as u16)?;
+        pkt.write_u16::<BigEndian>((8 + orig_len) as u16)?;
         // Checksum - lazy so putting 0
         pkt.write_u16::<BigEndian>(0)?;
 
@@ -144,8 +151,7 @@ impl<W: Write> PcapNgWriter<W> {
         // - Captured packet length
         block.write_u32::<LittleEndian>(packet_len as u32)?;
         // - Original packet length
-        // IMPROVE report truncated packets
-        block.write_u32::<LittleEndian>(packet_len as u32)?;
+        block.write_u32::<LittleEndian>(orig_packet_len as u32)?;
 
         // Packet with metadata
         block.write_all(&pkt)?;
