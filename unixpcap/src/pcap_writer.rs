@@ -66,7 +66,7 @@ impl<W: Write> PcapNgWriter<W> {
         &mut self,
         timestamp_ns: u64,
         tid: u32,
-        orig_len: u32,
+        orig_len: usize,
         data: &[u8],
     ) -> Result<()> {
         // Packet is written in EPB (see below)
@@ -78,7 +78,7 @@ impl<W: Write> PcapNgWriter<W> {
         // Ethernet (14) + IP (20) + UDP(8)
         let header_len = 14 + 20 + 8;
         let packet_len = header_len + data.len();
-        let orig_packet_len = header_len + (orig_len as usize);
+        let orig_packet_len = header_len + orig_len;
         // EPB requires 32bit alignment
         let padded_packet_len = (packet_len + 3) & !3;
 

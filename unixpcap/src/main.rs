@@ -15,11 +15,13 @@ use unixpcap_ebpf;
 struct CapturedPacketHeader {
     timestamp: u64,
     tid: u32,
-    orig_data_len: u32,
+    orig_data_len: u16,
 }
 
 struct CapturedPacket<'a> {
     hdr: CapturedPacketHeader,
+    src_path: &'a [u8],
+    dst_path: &'a [u8],
     data: &'a [u8],
 }
 
@@ -39,19 +41,23 @@ impl PcapCapture {
     }
     fn process_packet(&mut self, packet: CapturedPacket) -> Result<()> {
         // Print to stdout
-        match std::str::from_utf8(&packet.data) {
-            Ok(v) => println!(
-                "tid={}; timestamp={}; txt={}",
-                packet.hdr.tid, packet.hdr.timestamp, v
-            ),
-            Err(_) => println!(
-                "tid={}; timestamp={}; data={:02X?}",
-                packet.hdr.tid, packet.hdr.timestamp, packet.data
-            ),
-        };
+        let txt = std::str::from_utf8(&packet.data).unwrap_or("[unknown]");
+        let src = std::str::from_utf8(&packet.src_path).unwrap_or("[unknown]");
+        let dst = std::str::from_utf8(&packet.dst_path).unwrap_or("[unknown]");
+
+        println!(
+            "tid={}; timestamp={}; from={}; to={}; txt={}",
+            packet.hdr.tid, packet.hdr.timestamp, src, dst, txt
+        );
+
         // Add to writer
-        self.writer
-            .write_packet(packet.hdr.timestamp, packet.hdr.tid, packet.hdr.orig_data_len,packet.data)?;
+        self.writer.write_packet(
+            packet.hdr.timestamp,
+            packet.hdr.tid,
+            packet.hdr.orig_data_len as usize,
+            packet.data,
+        )?;
+
         Ok(())
     }
 }
@@ -79,20 +85,39 @@ fn main() -> Result<()> {
 
     let mut packet_rb_builder = RingBufferBuilder::default();
     packet_rb_builder.add(&skel.maps.captured_packets, |data| {
-        if data.len() < 16 {
+        // IMPROVE automated header deserialization.
+        const HEADER_SIZE: usize = 24;
+        if data.len() < HEADER_SIZE {
             return 0;
         }
-        capture
+        if data.len() < HEADER_SIZE {
+            return 0;
+        }
+
+        let src_len = byteorder::LittleEndian::read_u16(&data[14..16]) as usize;
+        let dst_len = byteorder::LittleEndian::read_u16(&data[16..18]) as usize;
+        let data_len = byteorder::LittleEndian::read_u16(&data[18..20]) as usize;
+        let s_b: usize = HEADER_SIZE;
+        let s_e = s_b + src_len;
+        let d_e = s_e + dst_len;
+
+        assert!(
+            HEADER_SIZE + src_len + dst_len + data_len == data.len(),
+            "malformed packet"
+        );
+        return capture
             .process_packet(CapturedPacket {
                 hdr: CapturedPacketHeader {
                     timestamp: byteorder::LittleEndian::read_u64(&data[0..8]),
                     tid: byteorder::LittleEndian::read_u32(&data[8..12]),
-                    orig_data_len: byteorder::LittleEndian::read_u32(&data[12..16]),
+                    orig_data_len: byteorder::LittleEndian::read_u16(&data[12..14]),
                 },
-                data: &data[16..],
+
+                src_path: &data[s_b..s_e],
+                dst_path: &data[s_e..d_e],
+                data: &data[d_e..],
             })
-            .unwrap();
-        return 0;
+            .map_or(-1, |_| 0);
     })?;
 
     println!("Building RB");

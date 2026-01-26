@@ -13,22 +13,23 @@ struct packet_hdr_t {
     // thread ID of the receiver
     uint32_t tid;
     // original packet length
-    //
-    // Captured length is deduced from ring buffer entry size.
-    uint32_t orig_data_len;
+    uint16_t orig_data_len;
+    // length of src_socket string in the captured packet
+    uint16_t src_path_len;
+    // length of dst_socket string in the captured packet
+    uint16_t dst_path_len;
+    // captured packet length
+    uint16_t data_len;
+    // padding
+    uint32_t reserved;
 };
 
-// Support up to 32KB packets, subtract header to make packets aligned.
-#define MAX_MSG_SIZE (32 * 1024 - sizeof(struct packet_hdr_t))
+#define MAX_MSG_SIZE (31 * 1024)
+// Maximum socket path
+#define MAX_SOCK_PATH (255)
 
-// Captured packet
-//
-// Layout of largest captured packet in the ring buffer.
-struct packet {
-    struct packet_hdr_t hdr;
-    // Trailing, variable length
-    uint8_t data[MAX_MSG_SIZE];
-};
+#define MAX_PACKET_SIZE                                                        \
+    (sizeof(struct packet_hdr_t) + MAX_SOCK_PATH + MAX_SOCK_PATH + MAX_MSG_SIZE)
 
 // Packet capture context across fentry-fexit
 //
@@ -58,7 +59,7 @@ struct {
     __uint(type, BPF_MAP_TYPE_PERCPU_ARRAY);
     __uint(max_entries, 1);
     __uint(key_size, sizeof(u32));
-    __uint(value_size, sizeof(struct packet));
+    __uint(value_size, MAX_PACKET_SIZE);
 } scratch_map SEC(".maps");
 
 // Per-thread fentry-fexit context storage for msghdr as it appear at the
@@ -129,7 +130,8 @@ BPF_PROG(unixpcap_unix_dgram_capture, struct socket *sock, struct msghdr *msg,
     }
 
     u32 zero = 0;
-    struct packet *scratch = bpf_map_lookup_elem(&scratch_map, &zero);
+    void *const scratch = bpf_map_lookup_elem(&scratch_map, &zero);
+    size_t n_written = 0;
     if (!scratch) // should not happen, make verifier happy
         goto cleanup;
 
@@ -138,23 +140,75 @@ BPF_PROG(unixpcap_unix_dgram_capture, struct socket *sock, struct msghdr *msg,
         goto cleanup;
     }
 
+    struct packet_hdr_t *hdr = (struct packet_hdr_t *)(scratch + n_written);
+    n_written = sizeof(*hdr);
+
+    // Capture source path
+    struct unix_sock *usk = (struct unix_sock *)sock->sk;
+    struct unix_address *uaddr = BPF_CORE_READ(usk, addr);
+    long src_len = 0;
+    if (uaddr) {
+        src_len =
+            bpf_probe_read_kernel_str(scratch + n_written, MAX_SOCK_PATH,
+                                      BPF_CORE_READ(&uaddr->name[0], sun_path));
+        if (src_len <= 0) {
+            src_len = 0;
+        }
+        n_written += src_len;
+    }
+
+    long dst_len = 0;
+    // Capture dst path
+    if (BPF_CORE_READ(msg, msg_name)) {
+        struct sockaddr_un *addr = BPF_CORE_READ(msg, msg_name);
+        // Unconnected sendto case
+        dst_len = bpf_probe_read_kernel_str(scratch + n_written, MAX_SOCK_PATH,
+                                            BPF_CORE_READ(addr, sun_path));
+        if (dst_len <= 0) {
+            dst_len = 0;
+        }
+        n_written += dst_len;
+    } else {
+        // Connected case
+        struct sock *peer_sk = BPF_CORE_READ(usk, peer);
+        if (peer_sk) {
+            struct socket *peer_socket = BPF_CORE_READ(peer_sk, sk_socket);
+            struct file *peer_file = BPF_CORE_READ(peer_socket, file);
+            struct inode *peer_inode_struct = BPF_CORE_READ(peer_file, f_inode);
+            struct unix_sock *peer_usk = (struct unix_sock *)peer_sk;
+            struct unix_address *peer_uaddr = BPF_CORE_READ(peer_usk, addr);
+            if (peer_uaddr) {
+                dst_len = bpf_probe_read_kernel_str(
+                    scratch + n_written, MAX_SOCK_PATH,
+                    BPF_CORE_READ(&peer_uaddr->name[0], sun_path));
+                if (dst_len <= 0) {
+                    dst_len = 0;
+                }
+                n_written += dst_len;
+            }
+        }
+    }
+
     // Capture data to scratch buffer (with verifier checks)
     size_t captured_len = len;
-    if (captured_len > 0) {
+    if (captured_len >= 0) {
         if (captured_len > MAX_MSG_SIZE) {
             captured_len = MAX_MSG_SIZE;
         }
-        bpf_probe_read_user(scratch->data, captured_len, state->data);
+        bpf_probe_read_user(scratch + n_written, captured_len, state->data);
+        n_written += captured_len;
     }
 
     // Fill packet header
-    scratch->hdr.orig_data_len = (uint32_t)len;
-    scratch->hdr.tid = (uint32_t)tid;
+    hdr->orig_data_len = (uint32_t)len;
+    hdr->tid = (uint32_t)tid;
     // IMPROVE there are new variants (coarse, boot) in newer kernels.
-    scratch->hdr.timestamp = bpf_ktime_get_ns();
+    hdr->timestamp = bpf_ktime_get_ns();
+    hdr->src_path_len = src_len;
+    hdr->dst_path_len = dst_len;
+    hdr->data_len = captured_len;
 
-    bpf_ringbuf_output(&captured_packets, scratch,
-                       sizeof(scratch->hdr) + captured_len, 0);
+    bpf_ringbuf_output(&captured_packets, scratch, n_written, 0);
 cleanup:
     bpf_map_delete_elem(&ctx_map, &tid);
     return 0;
