@@ -39,22 +39,36 @@ impl PcapCapture {
             writer: pcap_writer,
         })
     }
+
     fn process_packet(&mut self, packet: CapturedPacket) -> Result<()> {
         // Print to stdout
-        let txt = std::str::from_utf8(&packet.data).unwrap_or("[unknown]");
-        let src = std::str::from_utf8(&packet.src_path).unwrap_or("[unknown]");
-        let dst = std::str::from_utf8(&packet.dst_path).unwrap_or("[unknown]");
+        let txt = std::str::from_utf8(&packet.data).unwrap_or("[binary]");
+
+        let mut dst = std::str::from_utf8(&packet.dst_path).unwrap_or("@unknown:0");
+        if dst.len() == 0 {
+            dst = "@unknown:0";
+        }
+
+        let mut src = std::str::from_utf8(&packet.src_path).unwrap_or("");
+        let src_str;
+        if src.len() == 0 {
+            src_str = format!("@unbound:{}", packet.hdr.tid);
+            src = src_str.as_str();
+        }
 
         println!(
             "tid={}; timestamp={}; from={}; to={}; txt={}",
             packet.hdr.tid, packet.hdr.timestamp, src, dst, txt
         );
+        // Replace src path with TID
 
         // Add to writer
         self.writer.write_packet(
             packet.hdr.timestamp,
             packet.hdr.tid,
             packet.hdr.orig_data_len as usize,
+            src,
+            dst,
             packet.data,
         )?;
 

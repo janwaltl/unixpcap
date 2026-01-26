@@ -1,5 +1,6 @@
 use anyhow::Result;
 use byteorder::{BigEndian, LittleEndian, WriteBytesExt};
+use std::collections::HashMap;
 use std::io::Write;
 use std::net::Ipv4Addr;
 
@@ -8,11 +9,16 @@ use std::net::Ipv4Addr;
 pub struct PcapNgWriter<W: Write> {
     writer: W,
     seq: u32,
+    path_ip_map: HashMap<String, Ipv4Addr>,
 }
 
 impl<W: Write> PcapNgWriter<W> {
     pub fn new(writer: W) -> Result<Self> {
-        Ok(Self { writer, seq: 0 })
+        Ok(Self {
+            writer,
+            seq: 0,
+            path_ip_map: HashMap::new(),
+        })
     }
 
     pub fn write_header(&mut self) -> Result<()> {
@@ -62,11 +68,27 @@ impl<W: Write> PcapNgWriter<W> {
         Ok(())
     }
 
+    fn path_to_ip(&mut self, path: &str) -> Result<Ipv4Addr> {
+        match self.path_ip_map.get(path) {
+            Some(v) => Ok(*v),
+            None => {
+                // Unique IP based on size (+1 to avoid zero IP), assumes no removals
+                let ip = Ipv4Addr::from_bits(1+self.path_ip_map.len() as u32);
+                self.path_ip_map.insert(path.into(), ip);
+                // Write name resolution for the newly inserted IP-path pair.
+                self.write_nrb(ip, path)?;
+                return Ok(ip);
+            }
+        }
+    }
+
     pub fn write_packet(
         &mut self,
         timestamp_ns: u64,
         tid: u32,
         orig_len: usize,
+        src_path: &str,
+        dst_path: &str,
         data: &[u8],
     ) -> Result<()> {
         // Packet is written in EPB (see below)
@@ -110,12 +132,10 @@ impl<W: Write> PcapNgWriter<W> {
         pkt.write_u8(17)?;
         // Checksum - lazy so putting 0
         pkt.write_u16::<BigEndian>(0)?;
-        // Src IP - use thread ID
-        // IMPROVE use some socket ID and resolve it to process+path
-        pkt.write_all(&Ipv4Addr::from(tid).octets())?;
-        // Dst IP - use thread ID
-        // IMPROVE use some socket ID and resolve it to process+path
-        pkt.write_all(&Ipv4Addr::from(tid).octets())?;
+        // Src IP - use path
+        pkt.write_all(&self.path_to_ip(src_path)?.octets())?;
+        // Dst IP - use path
+        pkt.write_all(&self.path_to_ip(dst_path)?.octets())?;
 
         // UDP
         // Src port - use bits of thread ID
@@ -158,6 +178,49 @@ impl<W: Write> PcapNgWriter<W> {
 
         // Block total length again
         block.write_u32::<LittleEndian>(block_len)?;
+
+        self.writer.write_all(&block)?;
+        self.writer.flush()?;
+        Ok(())
+    }
+
+    fn write_nrb(&mut self, v4: Ipv4Addr, path: &str) -> Result<()> {
+        // Name Resolution Block (Type 4)
+        // Record Type 1
+        let mut record = Vec::new();
+
+        let namelen = path.len() as u16;
+        let record_len = 4 + namelen + 1; // IP(4) + String + Null
+        let padded_record_len = (record_len + 3) & !3;
+
+        // Record Type 1 (IPv4)
+        record.write_u16::<LittleEndian>(1)?;
+        // Record length
+        record.write_u16::<LittleEndian>(padded_record_len)?;
+        // Record IPv4
+        record.write_all(&v4.octets())?;
+        // Resolved name - socket path
+        record.write_all(path.as_bytes())?;
+        // Null
+        record.write_u8(0)?;
+        // Padding
+        for _ in 0..(padded_record_len - record_len) {
+            record.write_u8(0)?;
+        }
+
+        let mut block = Vec::new();
+        // Name Resolution block logic
+        // Block type = NRB
+        block.write_u32::<LittleEndian>(4)?;
+        // Block length = Header(8) + Records + Terminator(4) + Trailer(4)
+        let total_len = 8 + record.len() as u32 + 4 + 4;
+        block.write_u32::<LittleEndian>(total_len)?;
+        // Block records
+        block.write_all(&record)?;
+        // End of records
+        block.write_u32::<LittleEndian>(0)?;
+        // Block lengthk - repeated
+        block.write_u32::<LittleEndian>(total_len)?;
 
         self.writer.write_all(&block)?;
         self.writer.flush()?;
